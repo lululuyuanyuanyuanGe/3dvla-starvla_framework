@@ -8,4 +8,6 @@
 
 3.MapAnything加载丢失权重权重，可能是模型backbone里面多余的层数，推理中应该没有使用到，目前来看不影响结果。但是也可能是模型backbone和权重名称mismatch导致的
 
-4.MapAnything可以只依靠多张图片推理出camera intrinsic和metric，然后输出每张照片独立的点云，但是他们globally consistent
+4.MapAnything可以只依靠多张图片推理出camera intrinsic和metric，然后输出每张照片独立的点云，但是他们globally consistent.Output size [B(batch size), 518, 518, 3]
+
+5.Siglip input dim [B, 3, 383, 383], output dim [1,727,1152] 729 is the small patch inside an image, 1152 is the dim of the semantic tokens
