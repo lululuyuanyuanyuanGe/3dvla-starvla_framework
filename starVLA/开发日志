@@ -1,1 +1,8 @@
-mapanything的图片预处理功能有可能无法直接处理tensor形式，可能我们需要改动starvla dataloader来适配我们的图片要求
+1.mapanything的图片预处理功能有可能无法直接处理tensor形式，可能我们需要改动starvla dataloader来适配我们的图片要求
+
+
+2.MapAnything(/2025233147/gly/3dvla-starvla_framework/map-anything/mapanything/models/mapanything/model.py)里初始化模型会先从AWS bucket下载dinov2的参数，这步多余，因为huggingface上的4.91gb参数文件已经包含了它
+因此我们要在mapanythingwrapper里省略这一步，直接从huggingface里下载权重文件。但是dinov2的代码里会强制我们下载这个权重并load进模型skeleton里。我们采用with unittest.mock.patch('torch.hub.load_state_dict_from_url', side_effect=no_download_side_effect), \
+             unittest.mock.patch('torch.nn.Module.load_state_dict', side_effect=loose_load_state_dict, autospec=True):的方式来进行假下载，和假权重读取
+
+3.
