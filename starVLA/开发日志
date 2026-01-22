@@ -1,0 +1,1 @@
+mapanything的图片预处理功能有可能无法直接处理tensor形式，可能我们需要改动starvla dataloader来适配我们的图片要求
