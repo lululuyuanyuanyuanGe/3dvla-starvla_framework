@@ -84,7 +84,10 @@ class MapAnything(nn.Module):
         
         # Overwrite random weights with trained weights
         msg = self.model.load_state_dict(state_dict, strict=False)
+        # This is only for testing
         print(f"Weights Loaded. Missing: {len(msg.missing_keys)}, Unexpected: {len(msg.unexpected_keys)}")
+        if len(msg.missing_keys) > 0:
+            print(f"First 10 missing keys: {msg.missing_keys[:10]}")
         
         if self.freeze:
             for param in self.model.parameters():
@@ -175,6 +178,7 @@ if __name__ == "__main__":
         output = model(input_tensor)
         
         print(f"Output Shape: {output.shape}")
+        print(f"Output tensors: {output}")
         print("Success!")
         
     except Exception as e:
