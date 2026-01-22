@@ -25,7 +25,7 @@ starVLA/model/modules/
 
 ## 3. Implementation Steps
 
-### Phase 1: Infrastructure & Scaffolding (IN PROGRESS)
+### Phase 1: Infrastructure & Scaffolding (DONE)
 1.  **Create Directories:** Set up the new folders in `starVLA/model/modules/`. (DONE)
 2.  **Update `__init__.py` files:** Ensure the new folders and modules are importable and reachable by the registry. (DONE)
 
@@ -34,31 +34,38 @@ Each wrapper must implement the standard interface (config-based init, `forward`
 
 1.  **Geometric Encoder (`MapAnything`):** (DONE)
     *   **File:** `starVLA/model/modules/geometric_encoder_model/MapAnything.py`
-    *   **Status:** Implemented. Handles complex initialization for restricted network environments.
-    *   **Network Bypass Strategy (Fixing `torch.hub` crashes):**
-        *   **Problem:** The compute cluster blocks AWS/S3 (used by `torch.hub`), preventing DINOv2 weights download. `HF_ENDPOINT` only fixes Hugging Face, not `torch.hub`.
-        *   **Solution:** A "Manual Offline Load" strategy with double patching.
-            1.  **Mock URL Download:** Patched `torch.hub.load_state_dict_from_url` to return an empty dict `{}` instead of downloading.
-            2.  **Mock Strict Loading:** Patched `nn.Module.load_state_dict` to force `strict=False` during initialization. This allows DINOv2 to initialize with the empty dict (random weights) instead of crashing on missing keys.
-            3.  **Real Weight Load:** Manually downloaded `model.safetensors` (4.91GB) via HF Mirror (which works) and overwrote the random weights.
-    *   **Verification:** `python starVLA/model/modules/geometric_encoder_model/MapAnything.py` runs successfully.
+    *   **Status:** Implemented and Verified.
+    *   **Verification:** `python starVLA/model/modules/geometric_encoder_model/MapAnything.py` successfully outputs globally consistent point maps `[B, 518, 518, 3]`.
 
-2.  **Semantic Encoder (`SigLIP`):**
+2.  **Semantic Encoder (`SigLIP`):** (DONE)
     *   **File:** `starVLA/model/modules/semantic_encoder_model/SigLIP.py`
-    *   **Task:** Wrap the Hugging Face SigLIP model.
-    *   **Input:** 2D Images.
-    *   **Output:** Dense 2D semantic feature maps.
+    *   **Status:** Implemented and Verified.
+    *   **Task:** Wrap the Hugging Face SigLIP model to extract 2D semantic features.
+    *   **Input:** 2D Images (standardized to 384x384).
+    *   **Output:** Dense semantic feature maps `[B, 729, 1152]`.
+        *   **Tokens (729):** Derived from 27x27 grid patches (384px / patch size 14).
+        *   **Dimension (1152):** Hidden embedding size for `so400m` variant.
+    *   **Verification:** Successful inference on dummy input with expected tensor values.
 
 3.  **3D VLM (`Llava3D`):**
     *   **File:** `starVLA/model/modules/vlm/Llava3D.py`
-    *   **Task:** Wrap the Llava3D model.
-    *   **Crucial:** Implement `build_inputs` to handle the custom fused data format and ensure `output_hidden_states=True` is supported.
+    *   **Strategy:** Custom implementation using standard LLaVA backbone + Custom 3D Logic.
+    *   **Rationale:** Avoids dependency hell of `LLaVA-3D` repo and bypasses its redundant internal depth estimation.
+    *   **Task:** Wrap standard LLaVA model. Implement `forward` to accept *pre-fused* embeddings instead of raw images.
 
 ### Phase 3: The Glue (Fusion & Framework)
 
 1.  **Fusion Module:**
     *   **File:** `starVLA/model/modules/projector/GeometryFusion.py`
-    *   **Task:** Implement a learnable module (e.g., Cross-Attention or MLP) to align and merge the output of MapAnything and SigLIP before passing to the VLM.
+    *   **Alignment Strategy:** **Geometric Pooling**.
+        *   MapAnything Output: `[B, 518, 518, 3]` (Dense Points)
+        *   SigLIP Output: `[B, 729, 1152]` (27x27 Patches)
+        *   **Action:** Resize/Pool MapAnything to `[B, 27, 27, 3]` using `AdaptiveAvgPool2d`. Flatten to `[B, 729, 3]`.
+    *   **Fusion Logic:**
+        *   Project SigLIP: `Linear(1152 -> 1152)`
+        *   Embed Geometry: `MLP(3 -> 1152)` (Positional Encoding)
+        *   Add: `Fused = Semantics + Geometry_Embedding`
+        *   Project to LLM: `Linear(1152 -> 4096)`
 
 2.  **Framework Class (`3DVLA`):**
     *   **File:** `starVLA/model/framework/3DVLA.py`
@@ -75,7 +82,7 @@ Each wrapper must implement the standard interface (config-based init, `forward`
 2.  **Data Config (if needed):** Verify if `starVLA/dataloader/gr00t_lerobot/data_config.py` needs updates to load any special data required by MapAnything (e.g., camera intrinsics).
 
 ## 4. Execution Plan
-*   **Step 1:** Run `python starVLA/model/modules/geometric_encoder_model/MapAnything.py` to test MapAnything wrapper. (DONE)
-*   **Step 2:** Implement wrappers (SigLIP first, then Llava3D).
+*   **Step 1:** Verify MapAnything and SigLIP wrappers. (DONE)
+*   **Step 2:** Implement Llava3D wrapper (Custom).
 *   **Step 3:** Implement Fusion and Framework.
-*   **Step 4:** Create Config and Dry Run (verify dimensions match).
+*   **Step 4:** Create Config and Dry Run.

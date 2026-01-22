@@ -10,4 +10,8 @@
 
 4.MapAnything可以只依靠多张图片推理出camera intrinsic和metric，然后输出每张照片独立的点云，但是他们globally consistent.Output size [B(batch size), 518, 518, 3]
 
-5.Siglip input dim [B, 3, 383, 383], output dim [1,727,1152] 729 is the small patch inside an image, 1152 is the dim of the semantic tokens
+5.Siglip input dim [B, 3, 384, 384], output dim [1,729,1152] 729 is the small patch inside an image, 1152 is the dim of the semantic tokens
+
+6.semantic和geometric的融合，目前有两种方法
+    1) Adaptive avg pool,我们把geometric ouput的维度压缩到和siglip一样的维度(729是图片的一个patch，siglip把一张384输入图片划分为多个长度为14的patch,总共会有27*27个patch)，把518*518的输划分成27*27份patch，计算出每一份patch的平均x,y,z的值。如果我们的图片不够或者太大，采用padding或chopping的方式裁剪图片让他能划分成27*277份
+    2) Q-Former通过将
