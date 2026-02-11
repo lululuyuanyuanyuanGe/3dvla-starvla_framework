@@ -14,4 +14,4 @@
 
 6.semantic和geometric的融合，目前有两种方法
     1) Adaptive avg pool,我们把geometric ouput的维度压缩到和siglip一样的维度(729是图片的一个patch，siglip把一张384输入图片划分为多个长度为14的patch,总共会有27*27个patch)，把518*518的输划分成27*27份patch，计算出每一份patch的平均x,y,z的值。如果我们的图片不够或者太大，采用padding或chopping的方式裁剪图片让他能划分成27*277份
-    2) Q-Former通过将
+    2) Q-Former，先将mapanything和siglip的输出对齐到一个维度(和上述方式一样), 使用一组 Learnable Queries (如 64 个) 通过 Cross-Attention 同时从 SigLIP 和 MapAnything 提取信息。但是计算量非常大，要重新训练许多参数，作为备选方案
