@@ -77,3 +77,41 @@ class GeometryFusion(nn.Module):
         out = self.output_proj(fused) # [B, 729, LLM_Dim]
         
         return out
+
+if __name__ == "__main__":
+    from omegaconf import OmegaConf
+    
+    # Mock Config
+    mock_config = {
+        "framework": {
+            "projector": {
+                "semantic_dim": 1152,
+                "geometry_dim": 3,
+                "llm_dim": 4096,
+                "fusion_dim": 1152
+            }
+        }
+    }
+    cfg = OmegaConf.create(mock_config)
+    
+    print("Initializing GeometryFusion...")
+    model = GeometryFusion(cfg)
+    
+    # Mock Inputs
+    B = 2
+    # SigLIP Output: [B, 729, 1152]
+    semantic_features = torch.randn(B, 729, 1152)
+    # MapAnything Output: [B, 518, 518, 3]
+    geometric_map = torch.randn(B, 518, 518, 3)
+    
+    print(f"Input Semantics: {semantic_features.shape}")
+    print(f"Input Geometry: {geometric_map.shape}")
+    
+    print("Running Fusion...")
+    output = model(semantic_features, geometric_map)
+    
+    print(f"Output Shape: {output.shape}")
+    
+    expected_shape = (B, 729, 4096)
+    assert output.shape == expected_shape, f"Expected {expected_shape}, got {output.shape}"
+    print("Test Passed!")

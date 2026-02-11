@@ -1,0 +1,57 @@
+run_id: spatial_vla
+run_root_dir: results/Checkpoints
+seed: 42
+trackers: [jsonl, wandb]
+wandb_entity: your_wandb_entity
+wandb_project: starvla
+is_debug: true
+
+framework:
+  name: 3DVLA
+  
+  # 1. Semantic Encoder (SigLIP)
+  semantic_encoder_model:
+    model_path: google/siglip-so400m-patch14-384
+    freeze: true
+
+  # 2. Geometric Encoder (MapAnything)
+  geometric_encoder_model:
+    model_path: facebook/map-anything
+    freeze: true
+    image_size: 518
+
+  # 3. Fusion / Projector
+  projector:
+    semantic_dim: 1152
+    geometry_dim: 3
+    fusion_dim: 1152
+    llm_dim: 4096
+
+  # 4. VLM Backbone (LLaVA-1.5)
+  vlm:
+    model_path: llava-hf/llava-1.5-7b-hf
+    freeze_backbone: true
+
+  # 5. Action Head (DiT)
+  action_model:
+    action_model_type: DiT-B
+    action_hidden_dim: 1024 # Typically matches DiT hidden size
+    hidden_size: 1024       # Redundant but kept for compatibility
+    action_dim: 7
+    state_dim: 7
+    future_action_window_size: 16
+    past_action_window_size: 0
+    # Training Params
+    repeated_diffusion_steps: 4
+    noise_schedule: "squaredcos_cap_v2"
+
+datasets:
+  vla_data:
+    image_size: [224, 224] # Used for standard resizing if needed, though MapAnything/SigLIP have specific needs
+
+trainer:
+  epochs: 100
+  learning_rate:
+    base: 1.0e-4
+  optimizer:
+    name: AdamW

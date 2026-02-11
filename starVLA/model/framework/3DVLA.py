@@ -281,3 +281,78 @@ class ThreeDVLA(baseframework):
         normalized_actions = samples.cpu().numpy()
         return {"normalized_actions": normalized_actions}
 
+if __name__ == "__main__":
+    from omegaconf import OmegaConf
+    import numpy as np
+    import os
+    
+    # 1. Load Config
+    config_path = "starVLA/config/training/spatial_vla.yaml"
+    if not os.path.exists(config_path):
+        print(f"Config not found at {config_path}, creating mock config.")
+        mock_config = {
+            "framework": {
+                "name": "3DVLA",
+                "semantic_encoder_model": {"model_path": "google/siglip-so400m-patch14-384", "freeze": True},
+                "geometric_encoder_model": {"model_path": "facebook/map-anything", "freeze": True, "image_size": 518},
+                "projector": {"semantic_dim": 1152, "geometry_dim": 3, "fusion_dim": 1152, "llm_dim": 4096},
+                "vlm": {"model_path": "llava-hf/llava-1.5-7b-hf", "freeze_backbone": True},
+                "action_model": {
+                    "action_model_type": "DiT-S", # Use Small for test speed
+                    "action_hidden_dim": 384,     # Match DiT-S token size
+                    "action_dim": 7,
+                    "state_dim": 7,
+                    "future_action_window_size": 8,
+                    "past_action_window_size": 0,
+                    "repeated_diffusion_steps": 2
+                }
+            },
+            "datasets": {"vla_data": {"image_size": [224, 224]}},
+            "trainer": {"get": lambda k, d: 2} # Mock trainer config get method
+        }
+        cfg = OmegaConf.create(mock_config)
+    else:
+        cfg = OmegaConf.load(config_path)
+        # Override to DiT-S for faster local testing if needed, or keep DiT-B
+        # cfg.framework.action_model.action_model_type = "DiT-S"
+        # cfg.framework.action_model.action_hidden_dim = 384
+    
+    print("Initializing 3DVLA Framework...")
+    try:
+        model = ThreeDVLA(cfg)
+        model.eval()
+        
+        # Mock Data
+        image = Image.fromarray(np.random.randint(0, 255, (224, 224, 3), dtype=np.uint8))
+        text = "Pick up the red cube."
+        action = np.random.randn(16, 7).astype(np.float32) # [T, 7]
+        
+        example = {
+            "image": [image], # List for multi-view (we take first)
+            "lang": text,
+            "action": action
+        }
+        batch = [example, example] # Batch of 2
+        
+        print("\n--- Testing Forward (Training) ---")
+        if torch.cuda.is_available():
+            model = model.cuda()
+            print("Moved to CUDA")
+            
+        outputs = model(batch)
+        print(f"Action Loss: {outputs['action_loss'].item()}")
+        
+        print("\n--- Testing Predict Action (Inference) ---")
+        batch_images = [[image], [image]]
+        instructions = [text, text]
+        
+        pred = model.predict_action(batch_images, instructions, num_ddim_steps=2)
+        print(f"Predicted Action Shape: {pred['normalized_actions'].shape}")
+        
+        print("\nTest Passed!")
+        
+    except Exception as e:
+        print(f"\nTest Failed: {e}")
+        import traceback
+        traceback.print_exc()
+
