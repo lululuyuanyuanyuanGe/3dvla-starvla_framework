@@ -386,6 +386,8 @@ class LayerwiseFlowmatchingActionHead(nn.Module):
         temb,
         encoder_attention_mask=None,
         log_context="train",
+        geom_tokens=None,
+        geom_compressor=None,
     ):
         """
         Apply layerwise cross-attention between state-action embeddings and vision-language embeddings.
@@ -394,6 +396,9 @@ class LayerwiseFlowmatchingActionHead(nn.Module):
             saction_embs: Tensor of shape (B, seq_length, embedding_dim)
             vl_embs_list: List of tensors, each of shape (B, seq_length, embedding_dim)
             temb: Tensor of shape (B, embedding_dim)
+            geom_tokens: Optional. For static/qformer compression: [B, K, H_dit] tensor.
+                For per-layer compression: raw [B, G, geom_dim] tensor (requires geom_compressor).
+            geom_compressor: Optional. PerLayerProjectionCompressor instance for per-layer mode.
 
         Returns:
             hidden_states: Tensor of shape (B, seq_length, embedding_dim)
@@ -424,6 +429,26 @@ class LayerwiseFlowmatchingActionHead(nn.Module):
             else:
                 cross_context = vl_embs_list[layer_idx]
                 layer_encoder_attention_mask = encoder_attention_mask
+
+            # Inject geometric tokens into cross-attention context
+            if geom_tokens is not None:
+                if geom_compressor is not None:
+                    # Per-layer mode: compress with layer-specific projection
+                    gt = geom_compressor(geom_tokens, layer_idx)
+                else:
+                    # Static/QFormer mode: same precomputed tokens for all layers
+                    gt = geom_tokens
+                gt = gt.to(dtype=cross_context.dtype, device=cross_context.device)
+                cross_context = torch.cat((cross_context, gt), dim=1)
+                # Extend attention mask for the K geometric tokens
+                if layer_encoder_attention_mask is not None:
+                    geom_mask = torch.ones(
+                        gt.shape[:2], dtype=torch.bool, device=gt.device,
+                    )
+                    layer_encoder_attention_mask = torch.cat(
+                        (layer_encoder_attention_mask, geom_mask), dim=1,
+                    )
+
             hidden_states = layer(
                 hidden_states=hidden_states,
                 encoder_hidden_states=cross_context,
@@ -462,10 +487,15 @@ class LayerwiseFlowmatchingActionHead(nn.Module):
         actions: torch.Tensor,
         state: torch.Tensor = None,
         encoder_attention_mask: torch.Tensor = None,
+        geom_tokens: torch.Tensor = None,
+        geom_compressor=None,
     ):
         """
         vl_embs: list of torch.Tensor, each shape (B, seq_length, feature_dim)
         actions: shape (B, future_action_window_size, D_action)
+        geom_tokens: Optional [B, K, H_dit] compressed geometry (static/qformer),
+            or [B, G, geom_dim] raw geometry (per_layer, requires geom_compressor).
+        geom_compressor: Optional PerLayerProjectionCompressor for per-layer mode.
         """
         device = actions.device
         num_layers = len(vl_embs_list)
@@ -495,7 +525,7 @@ class LayerwiseFlowmatchingActionHead(nn.Module):
         future_tokens = self.future_tokens.weight.unsqueeze(0).expand(B, -1, -1)
         sa_embs = torch.cat((state_features, future_tokens, action_features), dim=1) \
             if state_features is not None else torch.cat((future_tokens, action_features), dim=1)
-        
+
         temb = self.model.timestep_encoder(t_discretized)
         hidden_states = self._apply_layerwise_cross_attention(
             sa_embs,
@@ -503,6 +533,8 @@ class LayerwiseFlowmatchingActionHead(nn.Module):
             temb,
             encoder_attention_mask=encoder_attention_mask,
             log_context="train",
+            geom_tokens=geom_tokens,
+            geom_compressor=geom_compressor,
         )
         pred_velocity = self._process_output(hidden_states, temb, actions.shape[1])
         loss = ((pred_velocity - velocity) ** 2).mean()
@@ -515,6 +547,8 @@ class LayerwiseFlowmatchingActionHead(nn.Module):
         state: torch.Tensor = None,
         noise_seed: int = None,
         encoder_attention_mask: torch.Tensor = None,
+        geom_tokens: torch.Tensor = None,
+        geom_compressor=None,
     ) -> torch.Tensor:
         # Set initial actions as the sampled noise.
         batch_size = vl_embs_list[0].shape[0]
@@ -577,6 +611,8 @@ class LayerwiseFlowmatchingActionHead(nn.Module):
                 temb,
                 encoder_attention_mask=encoder_attention_mask,
                 log_context="infer",
+                geom_tokens=geom_tokens,
+                geom_compressor=geom_compressor,
             )
             pred_velocity = self._process_output(hidden_states, temb, self.action_horizon)
             actions = actions + dt * pred_velocity

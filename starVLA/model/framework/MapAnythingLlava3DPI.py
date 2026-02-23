@@ -12,6 +12,8 @@ from starVLA.model.modules.action_model.LayerwiseFM_ActionHeader import (
     get_action_model,
     LayerwiseFlowmatchingActionHead,
 )
+from starVLA.model.modules.action_model.geom_compression import build_geom_compressor
+from starVLA.model.modules.action_model.geom_compression.per_layer_projection import PerLayerProjectionCompressor
 from starVLA.training.trainer_utils.trainer_tools import resize_images
 from deployment.model_server.tools.image_tools import to_pil_preserve
 
@@ -45,6 +47,26 @@ class MapAnythingLlava3D_PI(baseframework):
         )
 
         self.action_model: LayerwiseFlowmatchingActionHead = get_action_model(config=self.config)
+
+        # Geometry direct injection into DiT action head
+        self.geom_inject_to_dit = bool(
+            getattr(self.config.framework.action_model, "geom_inject_to_dit", False)
+        )
+        self.geom_compressor = None
+        if self.geom_inject_to_dit:
+            vlm_core = self.mapanythingllava3d_vlm_interface.model
+            geom_dim = vlm_core._infer_geom_dim()
+            self.geom_compressor = build_geom_compressor(
+                geom_dim=geom_dim,
+                hidden_dim=llm_hidden_size,
+                config=self.config,
+            )
+            compression_type = getattr(self.config.framework.action_model, "geom_compression_type", "pool")
+            num_k = int(getattr(self.config.framework.action_model, "geom_dit_tokens", 16))
+            logger.info(
+                f"[geom_inject] Enabled geometry injection to DiT: "
+                f"type={compression_type}, K={num_k}, geom_dim={geom_dim}, hidden_dim={llm_hidden_size}"
+            )
 
         self.future_action_window_size = config.framework.action_model.future_action_window_size
         self.past_action_window_size = config.framework.action_model.past_action_window_size
@@ -258,11 +280,32 @@ class MapAnythingLlava3D_PI(baseframework):
                 )
                 state_repeated = state.repeat(repeated_diffusion_steps, 1, 1)
 
+            # Prepare geometry for DiT injection if enabled
+            geom_tokens_for_dit = None
+            geom_compressor_for_dit = None
+            if self.geom_inject_to_dit and self.geom_compressor is not None:
+                raw_geom = getattr(vlm_outputs, "raw_geometric_features", None)
+                if raw_geom is None:
+                    vlm_core = getattr(self.mapanythingllava3d_vlm_interface, "model", None)
+                    raw_geom = getattr(vlm_core, "_last_raw_geometric_features", None)
+                if raw_geom is not None:
+                    raw_geom = raw_geom.to(device=base_hidden.device)
+                    if isinstance(self.geom_compressor, PerLayerProjectionCompressor):
+                        # Per-layer: pass raw features + compressor; each DiT layer gets its own projection
+                        geom_tokens_for_dit = raw_geom.repeat(repeated_diffusion_steps, 1, 1)
+                        geom_compressor_for_dit = self.geom_compressor
+                    else:
+                        # Static/QFormer: compress once, reuse at all layers
+                        geom_tokens_for_dit = self.geom_compressor(raw_geom)
+                        geom_tokens_for_dit = geom_tokens_for_dit.repeat(repeated_diffusion_steps, 1, 1)
+
             action_loss = self.action_model(
                 vl_embs_list_repeated,
                 actions_target_repeated,
                 state_repeated,
                 encoder_attention_mask=attention_mask_repeated,
+                geom_tokens=geom_tokens_for_dit,
+                geom_compressor=geom_compressor_for_dit,
             )
             try:
                 layer_means = getattr(self.action_model, "_last_dit_layer_means", None)
@@ -776,12 +819,30 @@ class MapAnythingLlava3D_PI(baseframework):
         if isinstance(attention_mask, torch.Tensor):
             attention_mask = attention_mask.to(device=base_hidden.device)
 
+        # Prepare geometry for DiT injection if enabled
+        geom_tokens_for_dit = None
+        geom_compressor_for_dit = None
+        if self.geom_inject_to_dit and self.geom_compressor is not None:
+            raw_geom = getattr(vlm_outputs, "raw_geometric_features", None)
+            if raw_geom is None:
+                vlm_core = getattr(self.mapanythingllava3d_vlm_interface, "model", None)
+                raw_geom = getattr(vlm_core, "_last_raw_geometric_features", None)
+            if raw_geom is not None:
+                raw_geom = raw_geom.to(device=base_hidden.device)
+                if isinstance(self.geom_compressor, PerLayerProjectionCompressor):
+                    geom_tokens_for_dit = raw_geom
+                    geom_compressor_for_dit = self.geom_compressor
+                else:
+                    geom_tokens_for_dit = self.geom_compressor(raw_geom)
+
         with torch.autocast("cuda", dtype=torch.float32):
             pred_actions = self.action_model.predict_action(
                 vl_embs_list,
                 state_tensor,
                 noise_seed=deterministic_seed,
                 encoder_attention_mask=attention_mask,
+                geom_tokens=geom_tokens_for_dit,
+                geom_compressor=geom_compressor_for_dit,
             )
 
         normalized_actions = pred_actions.detach().cpu().numpy()

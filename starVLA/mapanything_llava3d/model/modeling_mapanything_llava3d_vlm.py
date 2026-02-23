@@ -27,6 +27,7 @@ class MapAnythingLlava3DOutput(ModelOutput):
     hidden_states: Optional[Tuple[torch.FloatTensor]] = None
     attentions: Optional[Tuple[torch.FloatTensor]] = None
     image_hidden_states: Optional[torch.FloatTensor] = None
+    raw_geometric_features: Optional[torch.FloatTensor] = None
 
 
 class MapAnythingLlava3DPreTrainedModel(PreTrainedModel):
@@ -96,6 +97,7 @@ class MapAnythingLlava3DForConditionalGeneration(MapAnythingLlava3DPreTrainedMod
 
         self.pad_token_id = getattr(config, "pad_token_id", 0)
         self.vocab_size = config.text_config.vocab_size
+        self._last_raw_geometric_features = None
         self.geom_feature_hook_enabled = False
         self.geom_feature_hook_max_steps = 100
         self.geom_feature_stats = []
@@ -224,6 +226,7 @@ class MapAnythingLlava3DForConditionalGeneration(MapAnythingLlava3DPreTrainedMod
         use_geom = getattr(self.config, "use_geometric_branch", True)
         if not use_geom:
             self._last_image_features = vision_feats
+            self._last_raw_geometric_features = None
             return vision_feats
 
         if multi_view:
@@ -244,6 +247,9 @@ class MapAnythingLlava3DForConditionalGeneration(MapAnythingLlava3DPreTrainedMod
             geometric_features = geometric_features.permute(0, 2, 3, 1).reshape(b, h * w, c)
         
         print(f"[mapanything_llava3d] geom_seq.shape: {tuple(geometric_features.shape)}")
+
+        # Save raw geometric features before fusion destroys spatial structure
+        self._last_raw_geometric_features = geometric_features
 
         final_features = self.fusion_module(geometric_features, vision_feats)
 
@@ -404,6 +410,7 @@ class MapAnythingLlava3DForConditionalGeneration(MapAnythingLlava3DPreTrainedMod
             hidden_states=outputs.hidden_states,
             attentions=outputs.attentions,
             image_hidden_states=image_features if pixel_values is not None else None,
+            raw_geometric_features=getattr(self, "_last_raw_geometric_features", None),
         )
 
     def prepare_inputs_for_generation(
