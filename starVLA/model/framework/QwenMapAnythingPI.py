@@ -368,3 +368,63 @@ class QwenMapAnything_PI(baseframework):
 
         normalized_actions = pred_actions.detach().cpu().numpy()
         return {"normalized_actions": normalized_actions}
+
+
+if __name__ == "__main__":
+    from omegaconf import OmegaConf
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--config_yaml",
+        type=str,
+        default="./starVLA/config/training/starvla_train_libero_qwen_mapanything_geom_inject.yaml",
+    )
+    parser.add_argument(
+        "--geom_compression_type",
+        type=str,
+        default="pool",
+        choices=["pool", "per_layer", "qformer"],
+    )
+    args, _ = parser.parse_known_args()
+
+    cfg = OmegaConf.load(args.config_yaml)
+    cfg.framework.action_model.geom_compression_type = args.geom_compression_type
+
+    print(f"=== Testing QwenMapAnythingPI (geom_compression_type={args.geom_compression_type}) ===")
+    print("Step 1: Building model...")
+    model = QwenMapAnything_PI(cfg)
+    print(model)
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model = model.to(device)
+
+    # Fake batch
+    image = Image.fromarray(np.random.randint(0, 255, (224, 224, 3), dtype=np.uint8))
+    sample = {
+        "action": np.random.uniform(-1, 1, size=(16, 7)).astype(np.float32),
+        "image": [image, image],  # two views
+        "lang": "Pick up the red cup and place it on the plate.",
+        "state": np.random.uniform(-1, 1, size=(1, 7)).astype(np.float32),
+    }
+    batch = [sample, sample]  # batch size 2
+
+    print("\nStep 2: Forward pass (training)...")
+    output = model(batch)
+    action_loss = output["action_loss"]
+    print(f"  Action Loss: {action_loss.item()}")
+
+    print("\nStep 3: Backward pass (gradient check)...")
+    action_loss.backward()
+    if model.geom_compressor is not None:
+        has_grad = any(p.grad is not None for p in model.geom_compressor.parameters())
+        print(f"  Geom compressor gradients: {has_grad}")
+    print("  Backward pass OK")
+
+    print("\nStep 4: Predict action (inference)...")
+    pred = model.predict_action([sample])
+    actions = pred["normalized_actions"]
+    print(f"  Predicted actions shape: {actions.shape}")
+    print(f"  Actions sample: {actions[0, 0, :]}")
+
+    print(f"\n=== ALL TESTS PASSED (geom_compression_type={args.geom_compression_type}) ===")
