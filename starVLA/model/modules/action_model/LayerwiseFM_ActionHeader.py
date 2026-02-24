@@ -244,7 +244,21 @@ class LayerwiseFlowmatchingActionHead(nn.Module):
         action_config = global_config.framework.action_model
         diffusion_model_cfg = action_config.diffusion_model_cfg
 
-        num_vl_layers = global_config.framework.mapanything_llava3d.num_vl_layers
+        # Read VL config from whichever namespace the framework populated
+        fw = global_config.framework
+        vl_cfg = (
+            getattr(fw, "mapanything_llava3d", None)
+            or getattr(fw, "qwenvl", None)
+            or getattr(fw, "qwen_mapanything", None)
+        )
+        if vl_cfg is None:
+            raise ValueError(
+                "Action head requires VL config in one of: "
+                "framework.mapanything_llava3d, framework.qwenvl, framework.qwen_mapanything"
+            )
+        num_vl_layers = vl_cfg.num_vl_layers
+        vl_hidden_dim = vl_cfg.vl_hidden_dim
+
         cfg_num_layers = None
         try:
             if isinstance(diffusion_model_cfg, dict):
@@ -260,11 +274,11 @@ class LayerwiseFlowmatchingActionHead(nn.Module):
             effective_num_layers = min(cfg_num_layers, num_vl_layers)
 
         DiTConfig["num_layers"] = effective_num_layers
-        DiTConfig["input_embedding_dim"] = global_config.framework.mapanything_llava3d.vl_hidden_dim
+        DiTConfig["input_embedding_dim"] = vl_hidden_dim
         DiTConfig["num_attention_heads"] = DiTConfig["input_embedding_dim"] // DiTConfig["attention_head_dim"]
         diffusion_model_cfg.update(DiTConfig)
         diffusion_model_cfg.cross_attention_dim = DiTConfig["input_embedding_dim"]
-        self.input_embedding_dim = global_config.framework.mapanything_llava3d.vl_hidden_dim
+        self.input_embedding_dim = vl_hidden_dim
         self.model = DiT(**diffusion_model_cfg)
         if isinstance(diffusion_model_cfg, dict):
             dit_output_dim = diffusion_model_cfg.get("output_dim", self.input_embedding_dim)

@@ -11,6 +11,10 @@ def get_vlm_model(config):
             qwenvl_cfg = getattr(fw, "qwenvl", None)
             if qwenvl_cfg is not None:
                 vlm_name = getattr(qwenvl_cfg, "base_vlm", None)
+        elif fw_name == "QwenMapAnythingPI":
+            qm_cfg = getattr(fw, "qwen_mapanything", None)
+            if qm_cfg is not None:
+                vlm_name = getattr(qm_cfg, "base_vlm", None)
         elif fw_name == "MapAnythingLlava3DPI":
             ma_cfg = getattr(fw, "mapanything_llava3d", None)
             if ma_cfg is not None:

@@ -2,29 +2,30 @@
 
 ## Problem
 
-The current `fusion_module()` in `modeling_mapanything_llava3d_vlm.py:253` mean-pools G geometric tokens into 1 averaged vector, destroying all spatial 3D information. By the time geometry reaches the DiT action head, it has been:
-1. Collapsed from G spatial tokens to 1 average vector
-2. Broadcast identically to every visual patch
-3. Passed through the entire LLM (further compressed)
-
-The DiT generates robot trajectories in 3D space — it needs precise geometry the most, but gets the worst version of it.
+The current `fusion_module()` mean-pools G geometric tokens into 1 averaged vector, destroying all spatial 3D information. The DiT generates robot trajectories in 3D space — it needs precise geometry the most, but gets the worst version of it.
 
 ## Solution: Bypass the LLM
 
 Inject compressed geometric features **directly** into the DiT action head's cross-attention context, so action tokens can attend to both VL semantics (from LLM) and raw 3D geometry (from MapAnything).
 
+### Architecture (Qwen2.5-VL + MapAnything)
+
 ```
-                     Semantic path (existing)
-SigLIP ──> fusion ──> LLM ──> vl_hidden_states ──> DiT cross-attn context ──┐
-                                                                              ├──> DiT ──> action
-MapAnything ──> compress to K tokens ──> DiT cross-attn context ────────────┘
-                     Geometric path (NEW)
+                     Semantic path
+Qwen2.5-VL (images + instruction) ──> multi-layer hidden states ──> DiT cross-attn context ──┐
+                                                                                               ├──> DiT ──> action
+MapAnything (standalone) ──> compress G→K tokens ──> DiT cross-attn context ──────────────────┘
+                     Geometric path (direct injection)
 ```
 
 At each DiT layer, the cross-attention context becomes:
 ```
 cross_context = concat(vl_embs_list[layer_idx], geom_tokens)  # [B, S+K, H_dit]
 ```
+
+### Framework
+
+**`QwenMapAnythingPI`** — Qwen2.5-VL provides the semantic path (language + vision understanding), MapAnything runs standalone as a pure geometric encoder (DINOv2 + multi-view transformer), and the 3D features are injected directly into the DiT action head.
 
 ---
 
@@ -33,11 +34,11 @@ cross_context = concat(vl_embs_list[layer_idx], geom_tokens)  # [B, S+K, H_dit]
 | Symbol | Meaning | Typical value |
 |--------|---------|---------------|
 | B | Batch size | varies |
-| G | Geometric sequence length (MapAnything output) | ~256-1024 |
+| G | Geometric sequence length (MapAnything output) | ~256 |
 | K | Compressed tokens (configurable) | 16 (default) |
 | geom_dim | MapAnything feature dimension | ~1024 |
-| H_dit | DiT hidden / cross-attention dimension | 4096 (= vl_hidden_dim) |
-| N | Number of DiT transformer blocks | 16-36 |
+| H_dit | DiT hidden / cross-attention dimension | 2048 (Qwen2.5-VL-3B) |
+| N | Number of DiT transformer blocks | 16 |
 | S | VL sequence length (lang + visual tokens) | ~512-1024 |
 
 ---
@@ -54,22 +55,22 @@ MapAnything output: [B, G, geom_dim]
   │
   ├── Step 1: Linear projection
   │     nn.Linear(geom_dim, H_dit)
-  │     [B, G, geom_dim] ──> [B, G, H_dit]
+  │     [B, G, 1024] ──> [B, G, 2048]
   │
   ├── Step 2: Group pooling (G -> K tokens)
   │     Split G into K groups of size G//K, mean-pool each group
-  │     [B, G, H_dit] ──reshape──> [B, K, G//K, H_dit] ──mean(dim=2)──> [B, K, H_dit]
+  │     [B, G, 2048] ──reshape──> [B, K, G//K, 2048] ──mean(dim=2)──> [B, K, 2048]
   │
-  └── Output: [B, K, H_dit]   (same tokens used at EVERY DiT layer)
+  └── Output: [B, K, 2048]   (same tokens used at EVERY DiT layer)
 ```
 
 ### How It's Used in the DiT
 
 ```python
-geom_tokens = compressor(raw_geom_feats)        # [B, K, H_dit]  (computed once)
+geom_tokens = compressor(raw_geom_feats)        # [B, K, 2048]  (computed once)
 
 for layer_idx, layer in enumerate(dit_blocks):
-    context = cat([vl_embs_list[layer_idx], geom_tokens], dim=1)  # [B, S+K, H_dit]
+    context = cat([vl_embs_list[layer_idx], geom_tokens], dim=1)  # [B, S+K, 2048]
     hidden_states = layer(hidden_states, encoder_hidden_states=context)
 ```
 
@@ -77,7 +78,7 @@ for layer_idx, layer in enumerate(dit_blocks):
 
 | Property | Value |
 |----------|-------|
-| Parameters added | `geom_dim * H_dit` (one linear layer, ~4M for 1024*4096) |
+| Parameters added | `geom_dim * H_dit` (one linear layer, ~2M for 1024*2048) |
 | Sequence length increase | +K per DiT layer cross-attention |
 | Adaptive to input | No (fixed group boundaries) |
 | Per-layer specialization | No (same tokens at every layer) |
@@ -97,10 +98,10 @@ MapAnything output: [B, G, geom_dim]
   ├── For DiT layer i:
   │     ├── Step 1: Layer-specific linear projection
   │     │     self.projectors[i] = nn.Linear(geom_dim, H_dit)   # different weights per layer!
-  │     │     [B, G, geom_dim] ──> [B, G, H_dit]
+  │     │     [B, G, 1024] ──> [B, G, 2048]
   │     │
   │     └── Step 2: Group pooling (same as Approach A)
-  │           [B, G, H_dit] ──> [B, K, H_dit]
+  │           [B, G, 2048] ──> [B, K, 2048]
   │
   └── Each DiT layer gets a DIFFERENT projection of the same geometry
 ```
@@ -109,7 +110,7 @@ MapAnything output: [B, G, geom_dim]
 
 ```python
 for layer_idx, layer in enumerate(dit_blocks):
-    geom_tokens = compressor(raw_geom_feats, layer_idx)  # [B, K, H_dit] (different per layer!)
+    geom_tokens = compressor(raw_geom_feats, layer_idx)  # [B, K, 2048] (different per layer!)
     context = cat([vl_embs_list[layer_idx], geom_tokens], dim=1)
     hidden_states = layer(hidden_states, encoder_hidden_states=context)
 ```
@@ -118,7 +119,7 @@ for layer_idx, layer in enumerate(dit_blocks):
 
 | Property | Value |
 |----------|-------|
-| Parameters added | `N * geom_dim * H_dit` (N linear layers, ~64M for 16*1024*4096) |
+| Parameters added | `N * geom_dim * H_dit` (N linear layers, ~33M for 16*1024*2048) |
 | Sequence length increase | +K per DiT layer cross-attention |
 | Adaptive to input | No |
 | Per-layer specialization | Yes (each layer can extract different geometric aspects) |
@@ -137,23 +138,23 @@ MapAnything output: [B, G, geom_dim]
   │
   ├── Step 1: Linear projection
   │     nn.Linear(geom_dim, H_dit)
-  │     [B, G, geom_dim] ──> [B, G, H_dit]
+  │     [B, G, 1024] ──> [B, G, 2048]
   │
   ├── Step 2: K learnable query tokens (nn.Parameter)
   │     self.geom_queries = nn.Parameter(randn(1, K, H_dit))
-  │     Expand to batch: [1, K, H_dit] ──> [B, K, H_dit]
+  │     Expand to batch: [1, K, 2048] ──> [B, K, 2048]
   │
   ├── Step 3: Cross-attention
-  │     query = learned queries    [B, K, H_dit]  ←── "what to extract"
-  │     key   = projected geometry [B, G, H_dit]  ←── "what's available"
-  │     value = projected geometry [B, G, H_dit]  ←── "what gets read"
+  │     query = learned queries    [B, K, 2048]  ←── "what to extract"
+  │     key   = projected geometry [B, G, 2048]  ←── "what's available"
+  │     value = projected geometry [B, G, 2048]  ←── "what gets read"
   │
   │     For each query q_i:
-  │       scores_j = dot(q_i, geom_j) / sqrt(H_dit)   for j=0..G-1
+  │       scores_j = dot(q_i, geom_j) / sqrt(2048)   for j=0..G-1
   │       weights = softmax(scores)                    [K, G]
   │       output_i = sum(weights_j * geom_j)           weighted combination
   │
-  │     Output: [B, K, H_dit]
+  │     Output: [B, K, 2048]
   │
   └── Same K tokens used at every DiT layer (same as Approach A)
 ```
@@ -177,7 +178,7 @@ Approach C (learned queries):
 
 | Property | Value |
 |----------|-------|
-| Parameters added | `geom_dim * H_dit + K * H_dit + 3 * H_dit * H_dit` (~52M) |
+| Parameters added | `geom_dim * H_dit + K * H_dit + 3 * H_dit * H_dit` (~26M) |
 | Sequence length increase | +K per DiT layer cross-attention |
 | Adaptive to input | Yes (attention weights change per scene) |
 | Per-layer specialization | No (same compressed tokens at every layer) |
@@ -189,7 +190,7 @@ Approach C (learned queries):
 | | Approach A (Static) | Approach B (Per-Layer) | Approach C (Q-Former) |
 |---|---|---|---|
 | Compression method | Group pooling | Group pooling | Learned cross-attention |
-| Parameters | ~4M | ~64M (16 layers) | ~52M |
+| Parameters | ~2M | ~33M (16 layers) | ~26M |
 | Input-adaptive | No | No | Yes |
 | Per-layer specialized | No | Yes | No |
 | Complexity | Very low | Low | Medium |
@@ -202,6 +203,11 @@ Approach C (learned queries):
 
 ```yaml
 framework:
+  name: QwenMapAnythingPI
+  qwen_mapanything:
+    base_vlm: ./playground/Pretrained_models/Qwen2.5-VL-3B-Instruct
+    mapanything_model_path: /path/to/mapanything
+
   action_model:
     # Enable geometry injection into DiT
     geom_inject_to_dit: true
@@ -216,14 +222,14 @@ framework:
     geom_qformer_heads: 8
 ```
 
-## Files Modified
+## Files
 
-| File | Change |
-|------|--------|
+| File | Role |
+|------|------|
+| `starVLA/model/framework/QwenMapAnythingPI.py` | Framework: Qwen2.5-VL + standalone MapAnything + geometry injection |
 | `starVLA/model/modules/action_model/geom_compression/__init__.py` | Factory `build_geom_compressor()` |
 | `starVLA/model/modules/action_model/geom_compression/static_prefix.py` | Approach A |
 | `starVLA/model/modules/action_model/geom_compression/per_layer_projection.py` | Approach B |
 | `starVLA/model/modules/action_model/geom_compression/qformer_compression.py` | Approach C |
-| `starVLA/mapanything_llava3d/model/modeling_mapanything_llava3d_vlm.py` | Return raw geom features before fusion |
-| `starVLA/model/framework/MapAnythingLlava3DPI.py` | Instantiate compressor, pass geom to action head |
-| `starVLA/model/modules/action_model/LayerwiseFM_ActionHeader.py` | Accept `geom_tokens` in cross-attention |
+| `starVLA/model/modules/action_model/LayerwiseFM_ActionHeader.py` | DiT action head: accepts `geom_tokens` in cross-attention |
+| `starVLA/config/training/starvla_train_libero_qwen_mapanything_geom_inject.yaml` | Training config |
