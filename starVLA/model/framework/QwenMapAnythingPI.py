@@ -105,6 +105,9 @@ class QwenMapAnything_PI(baseframework):
         qm_cfg = self.config.framework.qwen_mapanything
         qm_cfg.vl_hidden_dim = llm_hidden_size
         qm_cfg.num_vl_layers = num_vl_layers
+        # Also mirror to qwenvl so action head finds them regardless of lookup order
+        self.config.framework.qwenvl.vl_hidden_dim = llm_hidden_size
+        self.config.framework.qwenvl.num_vl_layers = num_vl_layers
 
         # --- Geometric path: standalone MapAnything ---
         mapanything_model_path = getattr(qm_cfg, "mapanything_model_path", None)
@@ -151,6 +154,11 @@ class QwenMapAnything_PI(baseframework):
                 f"geom_dim={geom_dim}, hidden_dim={llm_hidden_size}"
             )
 
+        # --- Geometry feature cache (MapAnything is frozen → same input = same output) ---
+        self._geom_cache = {}
+        self._geom_cache_hits = 0
+        self._geom_cache_misses = 0
+
         # --- Config caching ---
         self.future_action_window_size = (
             config.framework.action_model.future_action_window_size
@@ -192,15 +200,44 @@ class QwenMapAnything_PI(baseframework):
     def _run_mapanything(self, batch_images, device):
         """Run MapAnything on batch images and return raw geometric features.
 
+        Uses an in-memory cache keyed by image content hash. Since MapAnything
+        is frozen, the same input image always produces identical features.
+        After the first epoch all frames are cached and MapAnything is skipped.
+
         Args:
             batch_images: list of list of PIL.Image
             device: torch device
         Returns:
             raw_geom: [B, G, geom_dim] tensor, or None if geometry injection disabled
         """
+        import hashlib
+
         if not self.geom_inject_to_dit or self.geom_compressor is None:
             return None
 
+        # Compute hash key for each sample's images
+        cache_keys = []
+        for sample_images in batch_images:
+            hasher = hashlib.md5()
+            for img in sample_images:
+                if not isinstance(img, Image.Image):
+                    img = Image.fromarray(np.asarray(img))
+                hasher.update(img.tobytes())
+            cache_keys.append(hasher.hexdigest())
+
+        # Check if ALL samples are cached
+        all_cached = all(k in self._geom_cache for k in cache_keys)
+
+        if all_cached:
+            self._geom_cache_hits += len(cache_keys)
+            cached = [
+                self._geom_cache[k].to(device=device, dtype=torch.float32)
+                for k in cache_keys
+            ]
+            return torch.stack(cached)
+
+        # Cache miss — run MapAnything on full batch
+        self._geom_cache_misses += len(cache_keys)
         pixel_values = _pil_images_to_mapanything_tensor(
             batch_images,
             target_size=self.mapanything_image_size,
@@ -211,7 +248,23 @@ class QwenMapAnything_PI(baseframework):
             geom_out = self.mapanything_encoder(
                 pixel_values=pixel_values, intrinsics=None
             )
-        return geom_out.last_hidden_state  # [B, G, geom_dim]
+        raw_geom = geom_out.last_hidden_state  # [B, G, geom_dim]
+
+        # Store each sample in cache (CPU, bf16 to save memory)
+        for i, key in enumerate(cache_keys):
+            if key not in self._geom_cache:
+                self._geom_cache[key] = raw_geom[i].detach().cpu().to(torch.bfloat16)
+
+        # Log cache stats periodically
+        total = self._geom_cache_hits + self._geom_cache_misses
+        if total % 1000 < len(cache_keys):
+            hit_rate = self._geom_cache_hits / total * 100 if total > 0 else 0
+            logger.info(
+                f"[GeomCache] {len(self._geom_cache)} entries, "
+                f"hit rate: {hit_rate:.1f}% ({self._geom_cache_hits}/{total})"
+            )
+
+        return raw_geom
 
     def _prepare_geom_for_dit(self, raw_geom, repeat_n=1):
         """Compress geometry and prepare for DiT injection.
@@ -222,6 +275,11 @@ class QwenMapAnything_PI(baseframework):
         """
         if raw_geom is None:
             return None, None
+
+        # Cast to compressor dtype (MapAnything outputs fp32, but DeepSpeed
+        # mixed precision may convert compressor weights to bf16)
+        target_dtype = next(self.geom_compressor.parameters()).dtype
+        raw_geom = raw_geom.to(dtype=target_dtype)
 
         if isinstance(self.geom_compressor, PerLayerProjectionCompressor):
             geom_tokens_for_dit = raw_geom

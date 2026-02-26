@@ -25,7 +25,8 @@ def get_vlm_model(config):
         qw_cfg = getattr(getattr(fw, "qwenvl", None), "base_vlm", None) if fw is not None else None
         vlm_name = ma_cfg or qw_cfg
 
-    if "Qwen2.5-VL" in vlm_name or "nora" in vlm_name.lower():
+    vlm_lower = vlm_name.lower().replace("-", "").replace("_", "")
+    if "qwen25vl" in vlm_lower or "qwen2.5vl" in vlm_lower or "nora" in vlm_lower:
         from .QWen2_5 import _QWen_VL_Interface 
         return _QWen_VL_Interface(config)
     elif "Qwen3-VL" in vlm_name:
